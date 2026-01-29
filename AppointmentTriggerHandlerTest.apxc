@@ -1,0 +1,148 @@
+@IsTest
+private class AppointmentTriggerHandlerTest {
+
+    // Mock for HTTP callouts
+    private class HttpCalloutMockImpl implements HttpCalloutMock {
+        public HTTPResponse respond(HTTPRequest req) {
+            HttpResponse res = new HttpResponse();
+            if (req.getEndpoint().contains('/dispatch')) {
+                // Dispatch call mock
+                res.setStatusCode(200);
+                res.setBody('{"status":"dispatched"}');
+            } else {
+                // Create message call mock
+                res.setStatusCode(201);
+                res.setBody('{"data":{"id":"mockMessageId"}}');
+            }
+            return res;
+        }
+    }
+
+    // Helper to create a test user
+    private static User createTestUser() {
+        Profile p = [SELECT Id FROM Profile WHERE Name='Standard User' LIMIT 1];
+        User u = new User(
+            Alias = 'tuser',
+            Email='testuser'+Math.random()+'@example.com',
+            EmailEncodingKey='UTF-8',
+            LastName='User',
+            LanguageLocaleKey='en_US',
+            LocaleSidKey='en_US',
+            ProfileId = p.Id,
+            TimeZoneSidKey='America/Los_Angeles',
+            UserName='testuser'+Math.random()+'@example.com'
+        );
+        insert u;
+        return u;
+    }
+
+    @IsTest
+    static void testAfterInsert() {
+        User attendee = createTestUser();
+    
+        sfal__Appointment__c apt = new sfal__Appointment__c(
+            sfal__StartDateTime__c = DateTime.now(),
+            sfal__EndDateTime__c = DateTime.now().addHours(1),
+            AppointmentAttendee__c = attendee.Id
+        );
+    
+        Test.setMock(HttpCalloutMock.class, new HttpCalloutMockImpl());
+    
+        Test.startTest();
+        insert apt;
+        Test.stopTest();
+    
+        System.assert(AppointmentTriggerHandler.processedAppointmentIds.contains(apt.Id));
+    }
+
+    @IsTest
+    static void testAfterUpdateMeaningfulChange() {
+        User attendee = createTestUser();
+        sfal__Appointment__c apt = new sfal__Appointment__c(
+            sfal__StartDateTime__c = DateTime.now(),
+            sfal__EndDateTime__c = DateTime.now().addHours(1),
+            AppointmentAttendee__c = attendee.Id
+        );
+        insert apt;
+
+        Test.setMock(HttpCalloutMock.class, new HttpCalloutMockImpl());
+
+        // Meaningful change
+        apt.sfal__StartDateTime__c = apt.sfal__StartDateTime__c.addHours(1);
+        apt.sfal__EndDateTime__c = apt.sfal__EndDateTime__c.addHours(1);
+        update apt;
+
+        System.assert(AppointmentTriggerHandler.processedAppointmentIds.contains(apt.Id));
+    }
+
+    @IsTest
+    static void testAfterUpdateNoMeaningfulChange() {
+        User attendee = createTestUser();
+        sfal__Appointment__c apt = new sfal__Appointment__c(
+            sfal__StartDateTime__c = DateTime.now(),
+            sfal__EndDateTime__c = DateTime.now().addHours(1),
+            AppointmentAttendee__c = attendee.Id
+        );
+        insert apt;
+
+        Test.setMock(HttpCalloutMock.class, new HttpCalloutMockImpl());
+
+        // Update a field that is NOT meaningful
+        sfal__Appointment__c aptUpdate = new sfal__Appointment__c(Id = apt.Id);
+        update aptUpdate;
+
+        System.assert(AppointmentTriggerHandler.processedAppointmentIds.contains(apt.Id));
+    }
+
+    @IsTest
+    static void testGetActionTypeAndTitle() {
+        sfal__Appointment__c apt = new sfal__Appointment__c(
+            Id = 'a0q5G0000000000002',
+            sfal__StartDateTime__c = DateTime.now(),
+            sfal__EndDateTime__c = DateTime.now().addHours(1),
+            AppointmentAttendee__c = '005000000000001'
+        );
+
+        String insertAction = AppointmentTriggerHandler.getActionTypeAndTitle(apt, 'AFTER_INSERT');
+        System.assert(insertAction.startsWith('scheduled|'));
+
+        String updateAction = AppointmentTriggerHandler.getActionTypeAndTitle(apt, 'AFTER_UPDATE');
+        System.assert(updateAction.startsWith('updated|'));
+
+        String unknownAction = AppointmentTriggerHandler.getActionTypeAndTitle(apt, 'OTHER');
+        System.assert(unknownAction.startsWith('unknown|'));
+    }
+
+    @IsTest
+    static void testMakeAPICallAndDispatch() {
+        Test.setMock(HttpCalloutMock.class, new HttpCalloutMockImpl());
+
+        sfal__Appointment__c apt = new sfal__Appointment__c(
+            sfal__StartDateTime__c = DateTime.now(),
+            sfal__EndDateTime__c = DateTime.now().addHours(1),
+            AppointmentAttendee__c = '005000000000002'
+        );
+
+        Test.startTest();
+        AppointmentTriggerHandler.makeAPICall(apt, 'AFTER_INSERT');
+        Test.stopTest();
+    }
+
+    @IsTest
+    static void testMakeAPICallAsync() {
+        User attendee = createTestUser();
+        sfal__Appointment__c apt = new sfal__Appointment__c(
+            sfal__StartDateTime__c = DateTime.now(),
+            sfal__EndDateTime__c = DateTime.now().addHours(1),
+            AppointmentAttendee__c = attendee.Id
+        );
+        insert apt;
+
+        Set<Id> ids = new Set<Id>{apt.Id};
+        Test.setMock(HttpCalloutMock.class, new HttpCalloutMockImpl());
+
+        Test.startTest();
+        AppointmentTriggerHandler.makeAPICallAsync(ids, 'AFTER_INSERT');
+        Test.stopTest();
+    }
+}

@@ -1,0 +1,146 @@
+/**
+ * AppointmentTriggerHandler
+ *
+ * Event-driven trigger handler that detects meaningful Appointment changes
+ * and sends notifications to Modo via an asynchronous REST integration.
+ *
+ * Key characteristics:
+ * - Bulk-safe
+ * - Event-driven (no polling)
+ * - Prevents duplicate processing in the same transaction
+ * - Uses async callouts for external notifications
+ *
+ * NOTE:
+ * - Authentication is handled via Salesforce Named Credentials
+ * - Endpoints and tokens are NOT hardcoded
+ */
+public with sharing class AppointmentTriggerHandler {
+
+    // Prevent duplicate processing within the same transaction
+    @TestVisible
+    private static Set<Id> processedAppointmentIds = new Set<Id>();
+
+    /**
+     * Entry point for AFTER INSERT trigger
+     */
+    public static void afterInsert(List<Appointment__c> newAppointments) {
+        handleAppointments(newAppointments, null);
+    }
+
+    /**
+     * Entry point for AFTER UPDATE trigger
+     */
+    public static void afterUpdate(
+        Map<Id, Appointment__c> newMap,
+        Map<Id, Appointment__c> oldMap
+    ) {
+        handleAppointments(newMap.values(), oldMap);
+    }
+
+    /**
+     * Core orchestration logic
+     */
+    private static void handleAppointments(
+        List<Appointment__c> appointments,
+        Map<Id, Appointment__c> oldMap
+    ) {
+        List<Appointment__c> toNotify = new List<Appointment__c>();
+
+        for (Appointment__c appt : appointments) {
+            if (processedAppointmentIds.contains(appt.Id)) {
+                continue;
+            }
+
+            if (isMeaningfulChange(appt, oldMap)) {
+                processedAppointmentIds.add(appt.Id);
+                toNotify.add(appt);
+            }
+        }
+
+        if (!toNotify.isEmpty()) {
+            sendNotificationsAsync(toNotify);
+        }
+    }
+
+    /**
+     * Determines whether an appointment change warrants a notification
+     */
+    @TestVisible
+    private static Boolean isMeaningfulChange(
+        Appointment__c current,
+        Map<Id, Appointment__c> oldMap
+    ) {
+        // Always notify on insert
+        if (oldMap == null || !oldMap.containsKey(current.Id)) {
+            return true;
+        }
+
+        Appointment__c oldAppt = oldMap.get(current.Id);
+
+        return current.Start_Time__c != oldAppt.Start_Time__c
+            || current.Status__c != oldAppt.Status__c
+            || current.Location__c != oldAppt.Location__c;
+    }
+
+    /**
+     * Async callout wrapper
+     */
+    @future(callout=true)
+    private static void sendNotificationsAsync(List<Appointment__c> appointments) {
+        for (Appointment__c appt : appointments) {
+            try {
+                sendModoNotification(appt);
+            } catch (Exception e) {
+                System.debug(
+                    LoggingLevel.ERROR,
+                    'Modo notification failed for Appointment ' + appt.Id + ': ' + e.getMessage()
+                );
+            }
+        }
+    }
+
+    /**
+     * Sends a single notification to Modo
+     */
+    @TestVisible
+    private static void sendModoNotification(Appointment__c appt) {
+        HttpRequest request = new HttpRequest();
+        request.setMethod('POST');
+
+        // Endpoint resolved via Named Credential
+        request.setEndpoint('callout:Modo_Named_Credential/api/messages');
+
+        request.setHeader('Content-Type', 'application/json');
+
+        Map<String, Object> payload = new Map<String, Object>{
+            'title' => 'Appointment Update',
+            'body'  => buildMessageBody(appt),
+            'referenceId' => appt.Id
+        };
+
+        request.setBody(JSON.serialize(payload));
+
+        Http http = new Http();
+        HttpResponse response = http.send(request);
+
+        if (response.getStatusCode() >= 300) {
+            throw new CalloutException(
+                'Modo API error: ' + response.getStatus()
+            );
+        }
+    }
+
+    /**
+     * Builds human-readable notification content
+     */
+    private static String buildMessageBody(Appointment__c appt) {
+        String siteBaseUrl = 'https://example.my.site.com';
+
+        return 'Your appointment has been updated.\n\n'
+            + 'Date: ' + String.valueOf(appt.Start_Time__c) + '\n'
+            + 'Location: ' + appt.Location__c + '\n'
+            + 'Status: ' + appt.Status__c + '\n\n'
+            + 'View details: '
+            + siteBaseUrl + '/success/s/appointment/' + appt.Id;
+    }
+}

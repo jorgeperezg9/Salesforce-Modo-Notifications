@@ -1,0 +1,3 @@
+trigger AppointmentTrigger on sfal__Appointment__c (after insert, after update) {
+    AppointmentTriggerHandler.handleAppointmentChanges(Trigger.new, Trigger.old, Trigger.operationType);
+}
